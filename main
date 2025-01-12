@@ -1,0 +1,99 @@
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from keras.models import Sequential
+from keras.layers import LSTM, Dense
+from keras.callbacks import EarlyStopping
+from keras.optimizers import Adam
+
+def rmse(actual, predicted):
+    return np.sqrt(np.mean((actual - predicted) ** 2))
+
+df = pd.read_excel("/content/sadece yolcu için.xlsx")
+df['Sefer Tarihi ve Saati'] = pd.to_datetime(df['Sefer Tarihi ve Saati'], dayfirst=True)
+df.set_index('Sefer Tarihi ve Saati', inplace=True)
+
+tatil_gunleri = [
+    '2024-01-01', '2024-05-01', '2024-10-28', '2024-10-29',
+    '2024-04-23', '2024-05-19', '2024-07-15', '2024-08-30',
+    '2024-04-09', '2024-04-10', '2024-04-11', '2024-04-12',
+    '2024-06-15', '2024-06-16', '2024-06-17', '2024-06-18', '2024-06-19'
+]
+df['Holiday'] = df.index.isin(pd.to_datetime(tatil_gunleri))
+
+features = ['Yakıt Masrafı', 'Saatlik Yolcu Ücreti', "Mil", "Ortalama Kullanılan Yakıt(Lt)",
+            "Tek Seferde  Kullanılan Toplam Yakıt(Lt)", "Litre Ücreti"]
+target = ['Yolcu Sayısı']
+
+df['Yolcu Sayısı Ortalaması'] = df.groupby([df.index.hour, 'Hat'])['Yolcu Sayısı'].transform('mean')
+
+scaler = MinMaxScaler()
+scaler_target = MinMaxScaler()
+
+train_data = df[df.index <= '2024-05-05']
+val_data = df[(df.index > '2024-05-05') & (df.index <= '2024-08-31')]
+test_data = df[df.index > '2024-08-31']
+
+X_train_raw = train_data[features].values
+y_train_raw = train_data[target].values
+X_val_raw = val_data[features].values
+y_val_raw = val_data[target].values
+X_test_raw = test_data[features].values
+y_test_raw = test_data[target].values
+
+X_train = scaler.fit_transform(X_train_raw)
+y_train = scaler_target.fit_transform(y_train_raw)
+X_val = scaler.transform(X_val_raw)
+y_val = scaler_target.transform(y_val_raw)
+X_test = scaler.transform(X_test_raw)
+y_test = scaler_target.transform(y_test_raw)
+
+def create_dataset(features, target, time_step=24):
+    X, Y = [], []
+    for i in range(len(features) - time_step):
+        X.append(features[i:(i + time_step), :])
+        Y.append(target[i + time_step, :])
+    return np.array(X), np.array(Y)
+
+time_step = 24
+X_train, y_train = create_dataset(X_train, y_train, time_step)
+X_val, y_val = create_dataset(X_val, y_val, time_step)
+X_test, y_test = create_dataset(X_test, y_test, time_step)
+
+def build_lstm_model():
+    model = Sequential()
+    model.add(LSTM(64, return_sequences=True, input_shape=(time_step, len(features))))
+    model.add(LSTM(32, return_sequences=True))
+    model.add(LSTM(64, return_sequences=True))
+    model.add(LSTM(192, return_sequences=True))
+    model.add(LSTM(96, return_sequences=True))
+    model.add(LSTM(32, return_sequences=True))
+    model.add(LSTM(96, return_sequences=True))
+    model.add(LSTM(64, return_sequences=True))
+    model.add(LSTM(64, return_sequences=True))
+    model.add(LSTM(192))
+    model.add(Dense(len(target)))
+    model.compile(optimizer=Adam(learning_rate=0.0038714), loss='mean_squared_error')
+    return model
+
+model = build_lstm_model()
+
+early_stopping = EarlyStopping(monitor='val_loss', patience=1, restore_best_weights=True)
+
+history = model.fit(
+    X_train, y_train, epochs=5, batch_size=1024,
+    validation_data=(X_val, y_val),
+    callbacks=[early_stopping],
+    verbose=1
+)
+
+val_predictions = model.predict(X_val)
+val_actuals = scaler_target.inverse_transform(y_val)
+val_predictions = scaler_target.inverse_transform(val_predictions)
+
+validation_rmse = rmse(val_actuals, val_predictions)
+print(f"Validation RMSE (Original Scale): {validation_rmse:.4f}")
+
+model.save('best_lstm_model_manual_hyperparameters.h5')
+print("The best model has been saved as 'best_lstm_model_manual_hyperparameters.h5'.")
